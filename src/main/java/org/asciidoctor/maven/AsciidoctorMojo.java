@@ -42,7 +42,7 @@ import java.util.*;
 /**
  * Basic maven plugin goal to render AsciiDoc files using Asciidoctor, a ruby port.
  */
-@Mojo(name = "process-asciidoc")
+@Mojo(name = "process-asciidoc", threadSafe = true)
 public class AsciidoctorMojo extends AbstractMojo {
     // copied from org.asciidoctor.AsciiDocDirectoryWalker.ASCIIDOC_REG_EXP_EXTENSION
     // should probably be configured in AsciidoctorMojo through @Parameter 'extension'
@@ -529,8 +529,13 @@ public class AsciidoctorMojo extends AbstractMojo {
         return outputFile;
     }
 
-    public void setOutputFile(File outputFile) {
-        this.outputFile = outputFile;
+    /**
+     * Maven sets it as an absolute path relative to project root.
+     * Using a string circumvents it.
+     * Maven properties (e.g. ${project.build.directory}) are resolved as string into absolute paths.
+     */
+    public void setOutputFile(String outputFile) {
+        this.outputFile = new File(outputFile);
     }
 
     public String getBackend() {
