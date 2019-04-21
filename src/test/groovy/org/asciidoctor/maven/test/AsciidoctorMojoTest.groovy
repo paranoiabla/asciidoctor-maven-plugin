@@ -4,8 +4,10 @@ import groovy.io.FileType
 import org.apache.commons.io.FileUtils
 import org.apache.maven.model.Resource
 import org.asciidoctor.maven.AsciidoctorMojo
-import org.asciidoctor.maven.io.AsciidoctorFileScanner
+import org.asciidoctor.maven.extensions.ExtensionConfiguration
 import org.asciidoctor.maven.test.plexus.MockPlexusContainer
+import org.asciidoctor.maven.test.processors.RequireCheckerTreeprocessor
+import spock.lang.Ignore
 import spock.lang.Specification
 
 /**
@@ -16,19 +18,8 @@ class AsciidoctorMojoTest extends Specification {
     static final String DEFAULT_SOURCE_DIRECTORY = 'target/test-classes/src/asciidoctor'
     static final String MULTIPLE_RESOURCES_OUTPUT = 'target/asciidoctor-output/multiple-resources'
 
-    /**
-     * Intercept Asciidoctor mojo constructor to mock and inject required
-     * plexus objects
-     */
     def setupSpec() {
-        MockPlexusContainer mockPlexusContainer = new MockPlexusContainer()
-        def oldConstructor = AsciidoctorMojo.constructors[0]
-
-        AsciidoctorMojo.metaClass.constructor = {
-            def mojo = oldConstructor.newInstance()
-            mockPlexusContainer.initializeContext(mojo)
-            return mojo
-        }
+        MockPlexusContainer.initializeMockContext(AsciidoctorMojo)
     }
 
     def "renders docbook"() {
@@ -86,6 +77,94 @@ class AsciidoctorMojoTest extends Specification {
             text.contains('Asciidoctor default stylesheet')
             !text.contains('<link rel="stylesheet" href="./asciidoctor.css">')
             text.contains('<pre class="CodeRay highlight">')
+    }
+
+    def "should convert a html with a single template"() {
+        setup:
+            final def templatesPath = 'target/test-classes/templates/'
+            File srcDir = new File(DEFAULT_SOURCE_DIRECTORY)
+            File outputDir = new File('target/asciidoctor-output')
+
+            if (!outputDir.exists())
+              outputDir.mkdir()
+        when:
+            AsciidoctorMojo mojo = new AsciidoctorMojo()
+            mojo.backend = 'html5'
+            mojo.sourceDirectory = srcDir
+            mojo.sourceDocumentName = 'sample.asciidoc'
+            mojo.resources = [new Resource(directory: '.', excludes: ['**/**'])]
+            mojo.outputDirectory = outputDir
+            mojo.templateDir = new File(templatesPath, 'set-1')
+
+            mojo.execute()
+        then:
+            outputDir.list().toList().isEmpty() == false
+            outputDir.list().toList().contains('sample.html')
+
+            File sampleOutput = new File('sample.html', outputDir)
+            sampleOutput.length() > 0
+            String text = sampleOutput.getText()
+            text.contains('custom-admonition-block')
+            !text.contains('custom-block-style')
+    }
+
+    def "should convert a html with a custom templates"() {
+        setup:
+            final def templatesPath = 'target/test-classes/templates/'
+            File srcDir = new File(DEFAULT_SOURCE_DIRECTORY)
+            File outputDir = new File('target/asciidoctor-output')
+
+            if (!outputDir.exists())
+                outputDir.mkdir()
+        when:
+            AsciidoctorMojo mojo = new AsciidoctorMojo()
+            mojo.backend = 'html5'
+            mojo.sourceDirectory = srcDir
+            mojo.sourceDocumentName = 'sample.asciidoc'
+            mojo.resources = [new Resource(directory: '.', excludes: ['**/**'])]
+            mojo.outputDirectory = outputDir
+            mojo.templateDirs = [new File(templatesPath, 'set-1'), new File(templatesPath, 'set-2')]
+
+            mojo.execute()
+        then:
+            outputDir.list().toList().isEmpty() == false
+            outputDir.list().toList().contains('sample.html')
+
+            File sampleOutput = new File('sample.html', outputDir)
+            sampleOutput.length() > 0
+            String text = sampleOutput.getText()
+            text.contains('custom-admonition-block')
+            text.contains('custom-block-style')
+    }
+
+    def "should convert a html merging templateDir & templateDirs"() {
+        setup:
+            final def templatesPath = 'target/test-classes/templates/'
+            File srcDir = new File(DEFAULT_SOURCE_DIRECTORY)
+            File outputDir = new File('target/asciidoctor-output')
+
+            if (!outputDir.exists())
+                outputDir.mkdir()
+        when:
+            AsciidoctorMojo mojo = new AsciidoctorMojo()
+            mojo.backend = 'html5'
+            mojo.sourceDirectory = srcDir
+            mojo.sourceDocumentName = 'sample.asciidoc'
+            mojo.resources = [new Resource(directory: '.', excludes: ['**/**'])]
+            mojo.outputDirectory = outputDir
+            mojo.templateDir = new File(templatesPath, 'set-1')
+            mojo.templateDirs = [new File(templatesPath, 'set-2')]
+
+            mojo.execute()
+        then:
+            outputDir.list().toList().isEmpty() == false
+            outputDir.list().toList().contains('sample.html')
+
+            File sampleOutput = new File('sample.html', outputDir)
+            sampleOutput.length() > 0
+            String text = sampleOutput.getText()
+            text.contains('custom-admonition-block')
+            text.contains('custom-block-style')
     }
 
     def "docinfo file should be ignored html"() {
@@ -208,11 +287,14 @@ class AsciidoctorMojoTest extends Specification {
             mojo.outputDirectory = outputDir
             mojo.sourceDirectory = srcDir
             mojo.sourceDocumentName = 'sample.asciidoc'
+            def extension = new ExtensionConfiguration()
+            extension.className = RequireCheckerTreeprocessor.class.name
+            mojo.extensions.add(extension)
             mojo.execute()
         then:
             outputDir.list().toList().isEmpty() == false
             outputDir.list().toList().contains('sample.html')
-            assert "constant".equals(org.asciidoctor.internal.JRubyRuntimeContext.get().evalScriptlet('defined? ::DateTime').toString())
+            new File(outputDir, 'sample.html').text.contains("${RequireCheckerTreeprocessor.simpleName} was here")
     }
 
     def "embedding resources"() {
@@ -650,6 +732,7 @@ class AsciidoctorMojoTest extends Specification {
      *
      * Test checks that an exception is not thrown.
      */
+    @Ignore("until compatibility with AsciidoctorJ is confirmed")
     def 'code highlighting - pygments'() {
         setup:
             File srcDir = new File('src/test/resources/src/asciidoctor')
@@ -662,6 +745,10 @@ class AsciidoctorMojoTest extends Specification {
             mojo.sourceHighlighter = 'pygments'
             mojo.sourceDocumentName = new File('main-document.adoc')
             mojo.backend = 'html'
+            mojo.attributes = [
+                    'pygments-style': 'monokai',
+                    'pygments-linenums-mode': 'inline'
+            ]
             mojo.execute()
 
         then:

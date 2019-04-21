@@ -26,17 +26,27 @@ import org.apache.maven.shared.filtering.MavenFilteringException;
 import org.apache.maven.shared.filtering.MavenResourcesExecution;
 import org.apache.maven.shared.filtering.MavenResourcesFiltering;
 import org.asciidoctor.*;
-import org.asciidoctor.internal.JRubyRuntimeContext;
+import org.asciidoctor.jruby.AbstractDirectoryWalker;
+import org.asciidoctor.jruby.AsciiDocDirectoryWalker;
+import org.asciidoctor.jruby.AsciidoctorJRuby;
+import org.asciidoctor.jruby.DirectoryWalker;
+import org.asciidoctor.jruby.internal.JRubyRuntimeContext;
+import org.asciidoctor.log.LogRecord;
+import org.asciidoctor.log.Severity;
 import org.asciidoctor.maven.extensions.AsciidoctorJExtensionRegistry;
 import org.asciidoctor.maven.extensions.ExtensionConfiguration;
 import org.asciidoctor.maven.extensions.ExtensionRegistry;
 import org.asciidoctor.maven.io.AsciidoctorFileScanner;
+import org.asciidoctor.maven.log.LogHandler;
+import org.asciidoctor.maven.log.LogRecordHelper;
+import org.asciidoctor.maven.log.MemoryLogHandler;
 import org.jruby.Ruby;
 import org.sonatype.plexus.build.incremental.BuildContext;
 
 import java.io.File;
 import java.io.IOException;
 import java.util.*;
+import java.util.logging.Logger;
 
 
 /**
@@ -105,6 +115,9 @@ public class AsciidoctorMojo extends AbstractMojo {
     @Parameter(property = AsciidoctorMaven.PREFIX + "templateDir", required = false)
     protected File templateDir;
 
+    @Parameter(property = AsciidoctorMaven.PREFIX + "templateDirs", required = false)
+    protected List<File> templateDirs = new ArrayList<>();
+
     @Parameter(property = AsciidoctorMaven.PREFIX + "templateEngine", required = false)
     protected String templateEngine;
 
@@ -157,6 +170,12 @@ public class AsciidoctorMojo extends AbstractMojo {
     @Parameter(defaultValue = "${session}", readonly = true, required = true)
     protected MavenSession session;
 
+    @Parameter(property = AsciidoctorMaven.PREFIX + "verbose")
+    protected boolean enableVerbose = false;
+
+    @Parameter
+    private LogHandler logHandler = new LogHandler();
+
     @Component
     protected MavenResourcesFiltering outputResourcesFiltering;
 
@@ -191,6 +210,9 @@ public class AsciidoctorMojo extends AbstractMojo {
         }
 
         final Asciidoctor asciidoctor = getAsciidoctorInstance(gemPath);
+        if (enableVerbose) {
+            asciidoctor.requireLibrary("enable_verbose.rb");
+        }
 
         asciidoctor.requireLibraries(requires);
 
@@ -220,12 +242,54 @@ public class AsciidoctorMojo extends AbstractMojo {
                 scanSourceFiles() : Arrays.asList(new File(sourceDirectory, sourceDocumentName));
 
         final Set<File> dirs = new HashSet<File>();
+
+        // register LogHandler to capture asciidoctor messages
+        final Boolean outputToConsole = logHandler.getOutputToConsole() == null ? Boolean.TRUE : logHandler.getOutputToConsole();
+        final MemoryLogHandler memoryLogHandler = new MemoryLogHandler(outputToConsole, sourceDirectory, getLog());
+        if (!sourceFiles.isEmpty()) {
+            asciidoctor.registerLogHandler(memoryLogHandler);
+            // disable default console output of AsciidoctorJ
+            Logger.getLogger("asciidoctor").setUseParentHandlers(false);
+        }
+
         for (final File source : sourceFiles) {
             final File destinationPath = setDestinationPaths(optionsBuilder, source);
             if (!dirs.add(destinationPath))
                 getLog().warn("Duplicated destination found: overwriting file: " + destinationPath.getAbsolutePath());
 
             renderFile(asciidoctor, optionsBuilder.asMap(), source);
+
+            // process log messages according to mojo configuration
+            if (logHandler.isSeveritySet() && logHandler.isContainsTextNotBlank()) {
+                final Severity severity = logHandler.getFailIf().getSeverity();
+                final String textToSearch = logHandler.getFailIf().getContainsText();
+
+                final List<LogRecord> records = memoryLogHandler.filter(severity, textToSearch);
+                if (records.size() > 0) {
+                    for (LogRecord record : records) {
+                        getLog().error(LogRecordHelper.format(record, sourceDirectory));
+                    }
+                    throw new MojoExecutionException(String.format("Found %s issue(s) matching severity %s or higher and text '%s'", records.size(), severity, textToSearch));
+                }
+            } else if (logHandler.isSeveritySet()) {
+                final Severity severity = logHandler.getFailIf().getSeverity();
+                final List<LogRecord> records = memoryLogHandler.filter(severity);
+                if (records.size() > 0) {
+                    for (LogRecord record : records) {
+                        getLog().error(LogRecordHelper.format(record, sourceDirectory));
+                    }
+                    throw new MojoExecutionException(String.format("Found %s issue(s) of severity %s or higher during rendering", records.size(), severity));
+                }
+            } else if (logHandler.isContainsTextNotBlank()) {
+                final String textToSearch = logHandler.getFailIf().getContainsText();
+                final List<LogRecord> records = memoryLogHandler.filter(textToSearch);
+                if (records.size() > 0) {
+                    for (LogRecord record : records) {
+                        getLog().error(LogRecordHelper.format(record, sourceDirectory));
+                    }
+                    throw new MojoExecutionException(String.format("Found %s issue(s) containing '%s'", records.size(), textToSearch));
+                }
+            }
         }
 
         if (synchronizations != null && !synchronizations.isEmpty()) {
@@ -335,13 +399,13 @@ public class AsciidoctorMojo extends AbstractMojo {
     protected Asciidoctor getAsciidoctorInstance(String gemPath) throws MojoExecutionException {
         Asciidoctor asciidoctor = null;
         if (gemPath == null) {
-            asciidoctor = Asciidoctor.Factory.create();
+            asciidoctor = AsciidoctorJRuby.Factory.create();
         } else {
             // Replace Windows path separator to avoid paths with mixed \ and /.
             // This happens for instance when setting: <gemPath>${project.build.directory}/gems-provided</gemPath>
             // because the project's path is converted to string.
             String normalizedGemPath = (File.separatorChar == '\\') ? gemPath.replaceAll("\\\\", "/") : gemPath;
-            asciidoctor = Asciidoctor.Factory.create(normalizedGemPath);
+            asciidoctor = AsciidoctorJRuby.Factory.create(normalizedGemPath);
         }
 
         Ruby rubyInstance = null;
@@ -409,7 +473,7 @@ public class AsciidoctorMojo extends AbstractMojo {
     }
 
     protected void renderFile(Asciidoctor asciidoctor, Map<String, Object> options, File f) {
-        asciidoctor.renderFile(f, options);
+        asciidoctor.convertFile(f, options);
         logRenderedFile(f);
     }
 
@@ -472,6 +536,9 @@ public class AsciidoctorMojo extends AbstractMojo {
 
         if (templateDir != null)
             optionsBuilder.templateDir(templateDir);
+
+        if (templateDirs != null)
+            optionsBuilder.templateDirs(templateDirs.toArray(new File[]{}));
     }
 
     protected void setAttributesOnBuilder(AttributesBuilder attributesBuilder) throws MojoExecutionException {
@@ -533,6 +600,8 @@ public class AsciidoctorMojo extends AbstractMojo {
      * Maven sets it as an absolute path relative to project root.
      * Using a string circumvents it.
      * Maven properties (e.g. ${project.build.directory}) are resolved as string into absolute paths.
+     *
+     * @param outputFile output file path
      */
     public void setOutputFile(String outputFile) {
         this.outputFile = new File(outputFile);
@@ -576,14 +645,6 @@ public class AsciidoctorMojo extends AbstractMojo {
 
     public void setHeaderFooter(boolean headerFooter) {
         this.headerFooter = headerFooter;
-    }
-
-    public File getTemplateDir() {
-        return templateDir;
-    }
-
-    public void setTemplateDir(File templateDir) {
-        this.templateDir = templateDir;
     }
 
     public String getTemplateEngine() {
